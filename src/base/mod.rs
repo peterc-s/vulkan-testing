@@ -128,8 +128,7 @@ impl App {
             debug_utils_loader = Some(debug_utils::Instance::new(&entry, &instance));
 
             debug_call_back = Some(unsafe { debug_utils_loader.as_ref().unwrap()
-                                   .create_debug_utils_messenger(&debug_info, None)
-                                   .unwrap() });
+                                   .create_debug_utils_messenger(&debug_info, None)? });
         }
 
         Ok(Self {
