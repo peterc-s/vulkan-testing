@@ -2,6 +2,7 @@ use std::{
     ffi::{CString, CStr},
     os::raw::{c_char, c_void},
     cell::RefCell,
+    str,
 };
 
 use ash::{
@@ -21,8 +22,9 @@ use winit::{
 };
 
 use crate::util::constants::*;
+use crate::util::*;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use log::*;
 
@@ -130,6 +132,36 @@ impl App {
             debug_call_back = Some(unsafe { debug_utils_loader.as_ref().unwrap()
                                    .create_debug_utils_messenger(&debug_info, None)? });
         }
+
+        // device stuff
+        let phys_devices = unsafe { match instance.enumerate_physical_devices() {
+            Ok(pdevices) => pdevices,
+            Err(e) => return Err(anyhow!("Failed to find GPUs with Vulkan support: {:?}", e))
+        } };
+
+        let (phys_device, queue_family_index) = match phys_devices
+            .iter()
+            .find_map(|pdevice| {
+                unsafe {
+                    instance
+                        .get_physical_device_queue_family_properties(*pdevice)
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, info)| {
+                            let support_graphics = info.queue_flags.contains(vk::QueueFlags::GRAPHICS);
+                            if support_graphics {
+                                Some((*pdevice, index))
+                            } else {
+                                None
+                            }
+                        })
+                }
+            }) {
+                Some(v) => v,
+                None => return Err(anyhow!("Failed to find suitable GPU."))
+            };
+
+        println!("Chosen device: {:?}", unsafe { string_from_utf8(&instance.get_physical_device_properties(phys_device).device_name) } );
 
         Ok(Self {
             entry,
