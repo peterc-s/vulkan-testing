@@ -1,21 +1,70 @@
+use std::ffi::CString;
+
+use vulkan_testing::util::constants::*;
+
 use winit::{
     dpi::LogicalSize,
     error::EventLoopError,
     event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
     keyboard::{Key, NamedKey},
-    window::{Window, WindowBuilder}
+    raw_window_handle::HasDisplayHandle,
+    window::WindowBuilder,
 };
 
-// Consts
-const WINDOW_TITLE: &'static str = "Vulkan Testing";
-const WINDOW_WIDTH: u32 = 800;
-const WINDOW_HEIGHT: u32 = 600;
+use ash::{vk, Entry, ext::debug_utils};
 
-struct VulkanApp;
+struct VulkanApp {
+    _entry: ash::Entry,
+    instance: ash::Instance,
+}
 
 impl VulkanApp {
-    fn init_window(event_loop: &EventLoop<()>) -> Window {
+    pub fn new(window: &winit::window::Window) -> VulkanApp {
+        // create linked entry
+        let entry = Entry::linked();
+
+        // create instance with window
+        let instance = VulkanApp::create_instance(&entry, window);
+
+        VulkanApp {
+            _entry: entry,
+            instance,
+        }
+    }
+
+    fn create_instance(entry: &Entry, window: &winit::window::Window) -> ash::Instance {
+        // create the VkApplicationInfo struct
+        let app_name = CString::new(WINDOW_TITLE).unwrap();
+        let app_info = vk::ApplicationInfo {
+            p_application_name: app_name.as_ptr(),
+            api_version: API_VERSION,
+            ..Default::default()
+        };
+
+        // get the required extensions using the window display handle
+        let mut extension_names = ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
+            .unwrap()
+            .to_vec();
+
+        // add debug_utils to required extensions
+        extension_names.push(debug_utils::NAME.as_ptr());
+
+        // create the VkInstanceCreateInfo struct
+        let create_info = vk::InstanceCreateInfo {
+            p_application_info: &app_info,
+            pp_enabled_extension_names: extension_names.as_ptr(),
+            enabled_extension_count: extension_names.len() as u32,
+            ..Default::default()
+        };
+
+        // create the instance itself
+        let instance = unsafe { entry.create_instance(&create_info, None).unwrap() };
+
+        instance
+    }
+
+    fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
         // following the vulkan tutorial,
         // creates a window with the given title,
         // the size in the vulkan tutorial,
@@ -28,7 +77,7 @@ impl VulkanApp {
             .expect("Failed to create window.")
     }
 
-    pub fn main_loop(event_loop: EventLoop<()>) -> Result<(), EventLoopError> {
+    pub fn main_loop(self, event_loop: EventLoop<()>) -> Result<(), EventLoopError> {
         // runs the main event loop
         // `event` is the given event,
         // `elwt` is the event loop window target that
@@ -69,7 +118,8 @@ impl VulkanApp {
 
 fn main() {
     let event_loop = EventLoop::new().unwrap();
-    let _window = VulkanApp::init_window(&event_loop);
+    let window = VulkanApp::init_window(&event_loop);
+    let vulkan_app = VulkanApp::new(&window);
 
-    let _ = VulkanApp::main_loop(event_loop);
+    vulkan_app.main_loop(event_loop).expect("Error in main event loop.");
 }
