@@ -59,6 +59,7 @@ pub struct AppData {
     pub swapchain_image_views: Vec<vk::ImageView>,
     pub pipeline_layout: vk::PipelineLayout,
     pub render_pass: vk::RenderPass,
+    pub pipeline: vk::Pipeline,
 }
 
 impl App {
@@ -101,7 +102,7 @@ impl App {
         create_swapchain_image_views(&device, &mut data)?;
 
         /* render pass*/
-        create_render_pass(&instance, &device, &mut data)?;
+        create_render_pass(&device, &mut data)?;
 
         /* pipeline */
         create_pipeline(&device, &mut data)?;
@@ -576,6 +577,21 @@ fn create_pipeline(
 
     data.pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
 
+    let stages = &[vert_stage, frag_stage];
+    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(stages)
+        .vertex_input_state(&vertex_input_state)
+        .input_assembly_state(&input_assembly_state)
+        .viewport_state(&viewport_state)
+        .rasterization_state(&rasterizer_state)
+        .multisample_state(&multisample_state)
+        .color_blend_state(&color_blend_state)
+        .layout(data.pipeline_layout)
+        .render_pass(data.render_pass)
+        .subpass(0);
+
+    data.pipeline = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None).unwrap()[0] };
+
     unsafe {
         device.destroy_shader_module(vert_shader_module, None);
         device.destroy_shader_module(frag_shader_module, None);
@@ -608,6 +624,7 @@ impl Drop for App {
         unsafe {
             self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
             self.device.destroy_render_pass(self.data.render_pass, None);
+            self.device.destroy_pipeline(self.data.pipeline, None);
 
             self.device.device_wait_idle().unwrap();
 
