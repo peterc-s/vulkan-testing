@@ -6,7 +6,7 @@ use std::{
 };
 
 use ash::{
-    ext::debug_utils, khr::{surface, swapchain}, vk::{self, SurfaceKHR}, Device, Entry, Instance
+    ext::debug_utils, khr::{surface, swapchain}, vk::{self, ComponentSwizzle, SurfaceKHR}, Device, Entry, Instance
 };
 
 use winit::{
@@ -46,6 +46,7 @@ pub struct App {
     pub swapchain_loader: swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_images: Vec<vk::Image>,
+    pub swapchain_image_views: Vec<vk::ImageView>,
     pub event_loop: RefCell<EventLoop<()>>,
 }
 
@@ -315,6 +316,33 @@ impl App {
 
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
+        let components = vk::ComponentMapping::default()
+            .r(vk::ComponentSwizzle::IDENTITY)
+            .g(vk::ComponentSwizzle::IDENTITY)
+            .b(vk::ComponentSwizzle::IDENTITY)
+            .a(vk::ComponentSwizzle::IDENTITY);
+
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+
+        let swapchain_image_views = swapchain_images
+            .iter()
+            .map(|i| {
+                let info = vk::ImageViewCreateInfo::default()
+                    .image(*i)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(swapchain_format)
+                    .components(components)
+                    .subresource_range(subresource_range);
+
+                unsafe { device.create_image_view(&info, None) }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             entry,
             instance,
@@ -334,6 +362,7 @@ impl App {
             swapchain_loader,
             swapchain,
             swapchain_images,
+            swapchain_image_views,
             event_loop: RefCell::new(event_loop),
         })
     }
@@ -369,6 +398,10 @@ impl Drop for App {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+
+            for &image_view in self.swapchain_image_views.iter() {
+                self.device.destroy_image_view(image_view, None);
+            }
             
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
 
