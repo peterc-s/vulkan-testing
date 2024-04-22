@@ -2,12 +2,12 @@ use std::{
     ffi::{CString, CStr},
     os::raw::{c_char, c_void},
     cell::RefCell,
-    str,
 };
 
 use ash::{
     ext::debug_utils,
-    vk, Entry, Instance
+    khr::portability_subset,
+    vk, Entry, Instance, Device
 };
 
 use winit::{
@@ -34,6 +34,10 @@ pub struct App {
     pub debug_utils_loader: Option<debug_utils::Instance>,
     pub debug_call_back: Option<vk::DebugUtilsMessengerEXT>,
     pub window: winit::window::Window,
+    pub device: Device,
+    pub phys_device: vk::PhysicalDevice,
+    pub queue_family_index: u32,
+    pub present_queue: vk::Queue,
     pub event_loop: RefCell<EventLoop<()>>,
 }
 
@@ -134,11 +138,13 @@ impl App {
         }
 
         // device stuff
+        // check if any vulkan supported GPUs exist
         let phys_devices = unsafe { match instance.enumerate_physical_devices() {
             Ok(pdevices) => pdevices,
             Err(e) => return Err(anyhow!("Failed to find GPUs with Vulkan support: {:?}", e))
         } };
 
+        // find a suitable GPU
         let (phys_device, queue_family_index) = match phys_devices
             .iter()
             .find_map(|pdevice| {
@@ -163,12 +169,44 @@ impl App {
 
         println!("Chosen device: {:?}", unsafe { string_from_utf8(&instance.get_physical_device_properties(phys_device).device_name) } );
 
+        let queue_family_index = queue_family_index as u32;
+        let features = vk::PhysicalDeviceFeatures::default();
+        let queue_priorities = [1.0];
+        let mut device_extension_names_raw = vec![];
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            device_extension_names_raw.push(portability_subset::NAME.as_ptr())
+        }
+
+        let queue_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .queue_priorities(&queue_priorities);
+
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(std::slice::from_ref(&queue_info))
+            .enabled_extension_names(&device_extension_names_raw)
+            .enabled_features(&features);
+
+        // create logical device
+        let device: Device = unsafe {
+            match instance.create_device(phys_device, &device_create_info, None) {
+                Ok(d) => d,
+                Err(e) => return Err(anyhow!("Failed to create logical device: {:?}", e))
+            }
+        };
+
+        // get a handle to the device queue
+        let present_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
         Ok(Self {
             entry,
             instance,
             debug_utils_loader,
             debug_call_back,
             window,
+            device,
+            phys_device,
+            queue_family_index,
+            present_queue,
             event_loop: RefCell::new(event_loop),
         })
     }
@@ -203,6 +241,9 @@ impl Drop for App {
     // so rust will clean up after us when the app is dropped
     fn drop(&mut self) {
         unsafe {
+            self.device.device_wait_idle().unwrap();
+            self.device.destroy_device(None);
+
             match (self.debug_utils_loader.clone(), self.debug_call_back) {
                 (Some(loader), Some(call_back)) => loader.destroy_debug_utils_messenger(call_back, None),
                 _ => {}
