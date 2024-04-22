@@ -5,7 +5,7 @@ use std::{
 };
 
 use ash::{
-    ext::debug_utils, khr::{surface, swapchain}, vk::{self, SurfaceKHR}, Device, Entry, Instance
+    ext::debug_utils, khr::{surface, swapchain}, vk::{self, Handle, SurfaceKHR}, Device, Entry, Instance
 };
 
 use winit::{
@@ -32,6 +32,7 @@ pub struct App {
     pub surface_loader: surface::Instance,
     pub device: Device,
     pub swapchain_loader: swapchain::Device,
+    pub frame: usize,
 }
 
 // holds all the lower level data
@@ -56,9 +57,10 @@ pub struct AppData {
     pub framebuffers: Vec<vk::Framebuffer>,
     pub command_pool: vk::CommandPool,
     pub command_buffers: Vec<vk::CommandBuffer>,
-    pub image_available_semaphore: vk::Semaphore,
-    pub render_finished_semaphore: vk::Semaphore,
-    pub in_flight_fences: vk::Fence,
+    pub image_available_semaphores: Vec<vk::Semaphore>,
+    pub render_finished_semaphores: Vec<vk::Semaphore>,
+    pub in_flight_fences: Vec<vk::Fence>,
+    pub images_in_flight: Vec<vk::Fence>,
 }
 
 impl App {
@@ -129,6 +131,8 @@ impl App {
         info!("Creating sync objects.");
         create_sync_objects(&device, &mut data)?;
 
+        let frame: usize = 0;
+
         Ok(Self {
             data,
             entry,
@@ -137,35 +141,45 @@ impl App {
             device,
             surface_loader,
             swapchain_loader,
+            frame,
         })
     }
 
     pub unsafe fn render_frame(
         &mut self,
     ) -> Result<()> {
-        self.device.wait_for_fences(&[self.data.in_flight_fence], true, u64::MAX)?;
-        self.device.reset_fences(&[self.data.in_flight_fence])?;
-        
+        let in_flight_fence = self.data.in_flight_fences[self.frame];
+        self.device.wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
+
         let image_index = self.swapchain_loader
             .acquire_next_image(
                 self.data.swapchain,
                 u64::MAX,
-                self.data.image_available_semaphore,
-                self.data.in_flight_fence
+                self.data.image_available_semaphores[self.frame],
+                vk::Fence::null(),
             )?
             .0 as usize;
 
-        let wait_semaphores = &[self.data.image_available_semaphore];
+        let image_in_flight = self.data.images_in_flight[image_index];
+        if !image_in_flight.is_null() {
+            self.device.wait_for_fences(&[image_in_flight], true, u64::MAX)?;
+        }
+
+        self.data.images_in_flight[image_index] = in_flight_fence;
+
+        let wait_semaphores = &[self.data.image_available_semaphores[self.frame]];
         let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let command_buffers = &[self.data.command_buffers[image_index as usize]];
-        let signal_semaphores = &[self.data.render_finished_semaphore];
+        let command_buffers = &[self.data.command_buffers[image_index]];
+        let signal_semaphores = &[self.data.render_finished_semaphores[self.frame]];
         let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(wait_semaphores)
             .wait_dst_stage_mask(wait_stages)
             .command_buffers(command_buffers)
             .signal_semaphores(signal_semaphores);
 
-        self.device.queue_submit(self.data.graphics_queue, &[submit_info], self.data.in_flight_fence)?;
+        self.device.reset_fences(&[in_flight_fence])?;
+
+        self.device.queue_submit(self.data.graphics_queue, &[submit_info], self.data.in_flight_fences[self.frame])?;
 
         let swapchains = &[self.data.swapchain];
         let image_indices = &[image_index as u32];
@@ -176,7 +190,32 @@ impl App {
 
         self.swapchain_loader.queue_present(self.data.present_queue, &present_info)?;
 
+        self.frame = (self.frame + 1) & MAX_FRAMES_IN_FLIGHT;
+
         Ok(())
+    }
+
+    pub unsafe fn destroy(&mut self) {
+        self.device.device_wait_idle().unwrap();
+
+        self.data.in_flight_fences.iter().for_each(|f| self.device.destroy_fence(*f, None));
+        self.data.render_finished_semaphores.iter().for_each(|s| self.device.destroy_semaphore(*s, None));
+        self.data.image_available_semaphores.iter().for_each(|s| self.device.destroy_semaphore(*s, None));
+        self.device.destroy_command_pool(self.data.command_pool, None);
+        self.data.framebuffers.iter().for_each(|f| self.device.destroy_framebuffer(*f, None));
+        self.device.destroy_pipeline(self.data.pipeline, None);
+        self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
+        self.device.destroy_render_pass(self.data.render_pass, None);
+        self.data.swapchain_image_views.iter().for_each(|v| self.device.destroy_image_view(*v, None));
+        self.swapchain_loader.destroy_swapchain(self.data.swapchain, None);
+        self.device.destroy_device(None);
+        self.surface_loader.destroy_surface(self.data.surface, None);
+
+        if VALIDATION_ENABLED {
+            self.data.debug_utils_loader.clone().unwrap().destroy_debug_utils_messenger(self.data.debug_call_back.unwrap(), None);
+        }
+
+        self.instance.destroy_instance(None);
     }
 }
 
@@ -749,10 +788,17 @@ fn create_sync_objects(
         .flags(vk::FenceCreateFlags::SIGNALED);
 
     unsafe {
-        data.image_available_semaphore = device.create_semaphore(&semaphore_info, None)?;
-        data.render_finished_semaphore = device.create_semaphore(&semaphore_info, None)?;
-        data.in_flight_fence = device.create_fence(&fence_info, None)?;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            data.image_available_semaphores.push(device.create_semaphore(&semaphore_info, None)?);
+            data.render_finished_semaphores.push(device.create_semaphore(&semaphore_info, None)?);
+            data.in_flight_fences.push(device.create_fence(&fence_info, None)?);
+        }
     }
+
+    data.images_in_flight = data.swapchain_images
+        .iter()
+        .map(|_| vk::Fence::null())
+        .collect();
 
     Ok(())
 }
@@ -760,47 +806,6 @@ fn create_sync_objects(
 /*
  * Structs
  */
-
-impl Drop for App {
-    // so rust will clean up after us when the app is dropped
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
-            self.device.destroy_pipeline(self.data.pipeline, None);
-
-            self.device.destroy_semaphore(self.data.render_finished_semaphore, None);
-            self.device.destroy_semaphore(self.data.image_available_semaphore, None);
-            self.device.destroy_fence(self.data.in_flight_fence, None);
-
-            self.data.framebuffers
-                .iter()
-                .for_each(|f| self.device.destroy_framebuffer(*f, None));
-
-            self.device.destroy_render_pass(self.data.render_pass, None);
-
-            self.device.destroy_command_pool(self.data.command_pool, None);
-            
-            self.device.device_wait_idle().unwrap();
-
-            self.data.swapchain_image_views
-                .iter()
-                .for_each(|i| self.device.destroy_image_view(*i, None));
-
-            self.swapchain_loader.destroy_swapchain(self.data.swapchain, None);
-
-            self.device.destroy_device(None);
-
-            match (self.data.debug_utils_loader.clone(), self.data.debug_call_back) {
-                (Some(loader), Some(call_back)) => loader.destroy_debug_utils_messenger(call_back, None),
-                _ => {}
-            };
-
-            self.surface_loader.destroy_surface(self.data.surface, None);
-
-            self.instance.destroy_instance(None);
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueueFamilyIndices {

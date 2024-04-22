@@ -7,3 +7,5 @@ pub const WINDOW_WIDTH: u32 = 800;
 pub const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
 pub const SHADER_MAIN: &CStr =  unsafe { &CStr::from_bytes_with_nul_unchecked(b"main\0") };
+
+pub const MAX_FRAMES_IN_FLIGHT: usize = 2;

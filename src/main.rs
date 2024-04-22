@@ -35,25 +35,25 @@ fn main() -> Result<()> {
         }
     };
 
-    event_loop.run_on_demand(|event, elwp| {
-        elwp.set_control_flow(ControlFlow::Poll);
+    event_loop.run_on_demand(|event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested 
-                    | WindowEvent::KeyboardInput {
-                        event: KeyEvent {
-                            state: ElementState::Pressed,
+            Event::AboutToWait => app.window.request_redraw(),
+            Event::WindowEvent { event, .. } => {
+                match event {
+                    WindowEvent::RedrawRequested if !elwt.exiting() => unsafe { app.render_frame() }.unwrap(),
+                    WindowEvent::KeyboardInput { event: KeyEvent {
                             logical_key: Key::Named(NamedKey::Escape),
+                            state: ElementState::Pressed,
                             ..
-                        },
-                        ..
-                    }, 
-                ..
-            } => {
-                println!("Exiting!");
-                elwp.exit();
+                        }, ..
+                    } => {
+                        elwt.exit();
+                        unsafe { app.destroy() };
+                    },
+                    _ => {},
+                }
             },
-            Event::AboutToWait => unsafe { app.render_frame().unwrap() },
             _ => {},
         }
     })?;
