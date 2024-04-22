@@ -2,22 +2,21 @@ use std::{
     ffi::{CString, CStr},
     os::raw::{c_char, c_void},
     cell::RefCell,
+    collections::HashSet,
 };
 
 use ash::{
-    ext::debug_utils,
-    khr::portability_subset,
-    vk, Entry, Instance, Device
+    ext::debug_utils, khr::{portability_subset, surface}, vk::{self, SurfaceKHR}, Device, Entry, Instance
 };
 
 use winit::{
     dpi::LogicalSize,
     error::EventLoopError,
     event::{ElementState, Event, KeyEvent, WindowEvent},
-    event_loop::{EventLoop, ControlFlow},
+    event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
     platform::run_on_demand::EventLoopExtRunOnDemand,
-    raw_window_handle::HasDisplayHandle,
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::WindowBuilder,
 };
 
@@ -36,8 +35,11 @@ pub struct App {
     pub window: winit::window::Window,
     pub device: Device,
     pub phys_device: vk::PhysicalDevice,
-    pub queue_family_index: u32,
+    pub queue_family_indices: QueueFamilyIndices,
     pub present_queue: vk::Queue,
+    pub graphics_queue: vk::Queue,
+    pub surface: vk::SurfaceKHR,
+    pub surface_loader: surface::Instance,
     pub event_loop: RefCell<EventLoop<()>>,
 }
 
@@ -137,6 +139,19 @@ impl App {
                                    .create_debug_utils_messenger(&debug_info, None)? });
         }
 
+        // create a surface
+        let surface = match unsafe { ash_window::create_surface(
+            &entry,
+            &instance,
+            window.display_handle()?.as_raw(),
+            window.window_handle()?.as_raw(),
+            None) } {
+            Ok(s) => s,
+            Err(e) => return Err(anyhow!("Failed to create window surface: {:?}", e)),
+        };
+
+        let surface_loader = surface::Instance::new(&entry, &instance);
+
         // device stuff
         // check if any vulkan supported GPUs exist
         let phys_devices = unsafe { match instance.enumerate_physical_devices() {
@@ -145,44 +160,53 @@ impl App {
         } };
 
         // find a suitable GPU
-        let (phys_device, queue_family_index) = match phys_devices
-            .iter()
-            .find_map(|pdevice| {
-                unsafe {
-                    instance
-                        .get_physical_device_queue_family_properties(*pdevice)
-                        .iter()
-                        .enumerate()
-                        .find_map(|(index, info)| {
-                            let support_graphics = info.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-                            if support_graphics {
-                                Some((*pdevice, index))
-                            } else {
-                                None
-                            }
-                        })
-                }
-            }) {
-                Some(v) => v,
-                None => return Err(anyhow!("Failed to find suitable GPU."))
-            };
+        let mut phys_device = Err(anyhow!("Failed to find suitable physical device"));
+
+        for pdevice in phys_devices {
+            let properties = unsafe { instance.get_physical_device_properties(pdevice) };
+
+            if let Err(error) = unsafe { QueueFamilyIndices::get(&instance, &surface, &surface_loader, pdevice) } {
+                warn!("Skipping physical device (`{}`): {}", unsafe { string_from_utf8(&properties.device_name) }, error);
+            } else {
+                info!("Selected physical device (`{}`).", unsafe { string_from_utf8(&properties.device_name) });
+                phys_device = Ok(pdevice);
+                break;
+            }
+        };
+
+        let phys_device = match phys_device {
+            Ok(p) => p,
+            Err(err) => return Err(err),
+        };
 
         println!("Chosen device: {:?}", unsafe { string_from_utf8(&instance.get_physical_device_properties(phys_device).device_name) } );
 
-        let queue_family_index = queue_family_index as u32;
-        let features = vk::PhysicalDeviceFeatures::default();
+        let queue_family_indices = unsafe { QueueFamilyIndices::get(&instance, &surface, &surface_loader, phys_device)? };
+
+        let mut unique_indices = HashSet::new();
+        unique_indices.insert(queue_family_indices.graphics);
+        unique_indices.insert(queue_family_indices.present);
+
         let queue_priorities = [1.0];
+
+        let queue_infos = unique_indices
+            .iter()
+            .map(|i| {
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(*i)
+                    .queue_priorities(&queue_priorities)
+            })
+            .collect::<Vec<_>>();
+
         let mut device_extension_names_raw = vec![];
         if cfg!(any(target_os = "macos", target_os = "ios")) {
             device_extension_names_raw.push(portability_subset::NAME.as_ptr())
         }
 
-        let queue_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .queue_priorities(&queue_priorities);
+        let features = vk::PhysicalDeviceFeatures::default();
 
         let device_create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_info))
+            .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extension_names_raw)
             .enabled_features(&features);
 
@@ -195,7 +219,8 @@ impl App {
         };
 
         // get a handle to the device queue
-        let present_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
+        let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
 
         Ok(Self {
             entry,
@@ -205,8 +230,11 @@ impl App {
             window,
             device,
             phys_device,
-            queue_family_index,
+            queue_family_indices,
             present_queue,
+            graphics_queue,
+            surface,
+            surface_loader,
             event_loop: RefCell::new(event_loop),
         })
     }
@@ -249,7 +277,40 @@ impl Drop for App {
                 _ => {}
             };
 
+            self.surface_loader.destroy_surface(self.surface, None);
+
             self.instance.destroy_instance(None);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueueFamilyIndices {
+    graphics: u32,
+    present: u32,
+}
+
+impl QueueFamilyIndices {
+    unsafe fn get(instance: &Instance, surface: &SurfaceKHR, surface_loader: &surface::Instance, physical_device: vk::PhysicalDevice) -> Result<Self> {
+        let properties = instance.get_physical_device_queue_family_properties(physical_device);
+
+        let graphics = properties
+            .iter()
+            .position(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|i| i as u32);
+
+        let mut present = None;
+        for (index, _properties) in properties.iter().enumerate() {
+            if surface_loader.get_physical_device_surface_support(physical_device, index as u32, *surface)? {
+                present = Some(index as u32);
+                break;
+            }
+        }
+
+        if let (Some(graphics), Some(present)) = (graphics, present) {
+            Ok(Self { graphics, present })
+        } else {
+            Err(anyhow!("Missing required queue families."))
         }
     }
 }
