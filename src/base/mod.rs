@@ -57,6 +57,7 @@ pub struct AppData {
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
+    pub pipeline_layout: vk::PipelineLayout,
 }
 
 impl App {
@@ -476,6 +477,66 @@ fn create_pipeline(
         .module(frag_shader_module)
         .name(SHADER_MAIN);
 
+    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+
+    let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .primitive_restart_enable(false);
+
+    // for future reference
+    // let dynamic_states = [
+    //     vk::DynamicState::VIEWPORT,
+    //     vk::DynamicState::SCISSOR,
+    // ];
+    //
+    // let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+    //     .dynamic_states(&dynamic_states);
+
+    let viewport = vk::Viewport::default()
+        .x(0.0)
+        .y(0.0)
+        .width(data.swapchain_extent.width as f32)
+        .height(data.swapchain_extent.height as f32)
+        .min_depth(0.0)
+        .max_depth(0.0);
+
+    let scissor = vk::Rect2D::default()
+        .offset(vk::Offset2D { x: 0, y: 0})
+        .extent(data.swapchain_extent);
+
+    let viewports = &[viewport];
+    let scissors = &[scissor];
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewports(viewports)
+        .scissors(scissors);
+
+    let rasterizer_state = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_bias_enable(true)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(vk::PolygonMode::FILL)
+        .line_width(1.0)
+        .cull_mode(vk::CullModeFlags::BACK)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .depth_bias_enable(false);
+
+    let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
+        .sample_shading_enable(false)
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+    let color_blend_attachment_state = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(false);
+
+    let color_blend_attachments = [color_blend_attachment_state];
+
+    let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(&color_blend_attachments);
+
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+
+    data.pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None)? };
+
     unsafe {
         device.destroy_shader_module(vert_shader_module, None);
         device.destroy_shader_module(frag_shader_module, None);
@@ -506,6 +567,8 @@ impl Drop for App {
     // so rust will clean up after us when the app is dropped
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
+
             self.device.device_wait_idle().unwrap();
 
             for &image_view in self.data.swapchain_image_views.iter() {
