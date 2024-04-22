@@ -61,6 +61,8 @@ pub struct AppData {
     pub render_pass: vk::RenderPass,
     pub pipeline: vk::Pipeline,
     pub framebuffers: Vec<vk::Framebuffer>,
+    pub command_pool: vk::CommandPool,
+    pub command_buffers: Vec<vk::CommandBuffer>,
 }
 
 impl App {
@@ -110,6 +112,10 @@ impl App {
 
         /* framebuffers */
         create_framebuffers(&device, &mut data)?;
+
+        /* command buffers */
+        create_command_pool(&device, &mut data)?;
+        create_command_buffers(&device, &mut data)?;
         
         Ok(Self {
             data,
@@ -287,7 +293,7 @@ fn choose_device(
         let properties = unsafe { instance.get_physical_device_properties(pdevice) };
 
         // check for required queue families
-        if let Err(error) = unsafe { QueueFamilyIndices::get(instance, &data.surface, surface_loader, pdevice) } {
+        if let Err(error) = unsafe { QueueFamilyIndices::get(instance, surface_loader, data) } {
             warn!("Skipping physical device (`{}`): {}", unsafe { string_from_utf8(&properties.device_name) }, error);
         } else {
             // if required queue families are present, then check required device extensions
@@ -343,7 +349,7 @@ fn create_logical_device(
         device_extension_names_raw: &Vec<*const i8>,
         data: &mut AppData
     ) -> Result<Device> {
-    data.queue_family_indices = unsafe { QueueFamilyIndices::get(instance, &data.surface, surface_loader, data.phys_device)? };
+    data.queue_family_indices = unsafe { QueueFamilyIndices::get(instance, surface_loader, data)? };
 
     let mut unique_indices = HashSet::new();
     unique_indices.insert(data.queue_family_indices.graphics);
@@ -639,6 +645,63 @@ fn create_framebuffers(
     Ok(())
 }
 
+fn create_command_pool(
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let command_pool_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(data.queue_family_indices.graphics);
+
+    data.command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
+
+    Ok(())
+}
+
+fn create_command_buffers(
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(data.command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(data.framebuffers.len() as u32);
+
+    data.command_buffers = unsafe { device.allocate_command_buffers(&allocate_info)? };
+
+    for (i, command_buffer) in data.command_buffers.iter().enumerate() {
+        let begin_info = vk::CommandBufferBeginInfo::default();
+
+        unsafe { device.begin_command_buffer(*command_buffer, &begin_info)? };
+
+        let render_area = vk::Rect2D::default()
+            .offset(vk::Offset2D::default())
+            .extent(data.swapchain_extent);
+
+        let color_clear_value = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+
+        let clear_values = &[color_clear_value];
+        let pass_begin_info = vk::RenderPassBeginInfo::default()
+            .render_pass(data.render_pass)
+            .framebuffer(data.framebuffers[i])
+            .render_area(render_area)
+            .clear_values(clear_values);
+
+        unsafe {
+            device.cmd_begin_render_pass(*command_buffer, &pass_begin_info, vk::SubpassContents::INLINE);
+            device.cmd_bind_pipeline(*command_buffer, vk::PipelineBindPoint::GRAPHICS, data.pipeline);
+            device.cmd_draw(*command_buffer, 3, 1, 0, 0);
+            device.cmd_end_render_pass(*command_buffer);
+            device.end_command_buffer(*command_buffer)?;
+        };
+    }
+
+    Ok(())
+}
+
 /*
  * Structs
  */
@@ -655,6 +718,8 @@ impl Drop for App {
                 .for_each(|f| self.device.destroy_framebuffer(*f, None));
 
             self.device.destroy_render_pass(self.data.render_pass, None);
+
+            self.device.destroy_command_pool(self.data.command_pool, None);
             
             self.device.device_wait_idle().unwrap();
 
@@ -685,8 +750,8 @@ pub struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    unsafe fn get(instance: &Instance, surface: &SurfaceKHR, surface_loader: &surface::Instance, physical_device: vk::PhysicalDevice) -> Result<Self> {
-        let properties = instance.get_physical_device_queue_family_properties(physical_device);
+    unsafe fn get(instance: &Instance, surface_loader: &surface::Instance, data: &mut AppData) -> Result<Self> {
+        let properties = instance.get_physical_device_queue_family_properties(data.phys_device);
 
         let graphics = properties
             .iter()
@@ -695,7 +760,7 @@ impl QueueFamilyIndices {
 
         let mut present = None;
         for (index, _properties) in properties.iter().enumerate() {
-            if surface_loader.get_physical_device_surface_support(physical_device, index as u32, *surface)? {
+            if surface_loader.get_physical_device_surface_support(data.phys_device, index as u32, data.surface)? {
                 present = Some(index as u32);
                 break;
             }
