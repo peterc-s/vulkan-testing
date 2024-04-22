@@ -1,7 +1,6 @@
 use std::{
     ffi::{CString, CStr},
     os::raw::{c_char, c_void},
-    cell::RefCell,
     collections::HashSet,
 };
 
@@ -10,11 +9,6 @@ use ash::{
 };
 
 use winit::{
-    error::EventLoopError,
-    event::{ElementState, Event, KeyEvent, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    keyboard::{Key, NamedKey},
-    platform::run_on_demand::EventLoopExtRunOnDemand,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
 };
 
@@ -32,7 +26,6 @@ use log::*;
 // holds all the top-level important data
 pub struct App {
     pub data: AppData,
-    pub event_loop: RefCell<EventLoop<()>>,
     pub entry: Entry,
     pub window: winit::window::Window,
     pub instance: Instance,
@@ -63,22 +56,29 @@ pub struct AppData {
     pub framebuffers: Vec<vk::Framebuffer>,
     pub command_pool: vk::CommandPool,
     pub command_buffers: Vec<vk::CommandBuffer>,
+    pub image_available_semaphore: vk::Semaphore,
+    pub render_finished_semaphore: vk::Semaphore,
+    pub in_flight_fences: vk::Fence,
 }
 
 impl App {
-    pub fn create(window: winit::window::Window, event_loop: EventLoop<()>) -> Result<Self> {
+    pub fn create(window: winit::window::Window) -> Result<Self> {
         let mut data = AppData::default();
 
         /* entry */
+        info!("Creating entry.");
         let entry = Entry::linked();
 
         /* instance */
+        info!("Creating instance.");
         let instance = create_instance(&window, &entry, &mut data)?;
 
         /* surface */
+        info!("Creating surface.");
         let surface_loader = create_surface(&entry, &instance, &window, &mut data)?;
 
         /* physical device */
+        info!("Choosing device.");
         // get required device extension names
         let device_extension_names = vec![
             swapchain::NAME,
@@ -92,6 +92,7 @@ impl App {
         choose_device(&instance, &surface_loader, &device_extension_names, &mut data)?;
 
         /* logical device */
+        info!("Creating logical device.");
         let device = create_logical_device(&instance, &surface_loader, &device_extension_names_raw, &mut data)?;
 
         // get a handle to the device queues
@@ -99,59 +100,83 @@ impl App {
         data.graphics_queue = unsafe { device.get_device_queue(data.queue_family_indices.graphics, 0) };
 
         /* swapchain */
+        info!("Creating swapchain.");
         let swapchain_loader = create_swapchain(&window, &instance, &device, &mut data)?;
 
         /* swapchain image views */
+        info!("Creating swapchain image views.");
         create_swapchain_image_views(&device, &mut data)?;
 
         /* render pass*/
+        info!("Creating render pass.");
         create_render_pass(&device, &mut data)?;
 
         /* pipeline */
+        info!("Creating pipeline.");
         create_pipeline(&device, &mut data)?;
 
         /* framebuffers */
+        info!("Creating framebuffers.");
         create_framebuffers(&device, &mut data)?;
 
         /* command buffers */
+        info!("Creating command pool.");
         create_command_pool(&device, &mut data)?;
+        info!("Creating command buffers.");
         create_command_buffers(&device, &mut data)?;
-        
+
+        /* semaphores & fence */
+        info!("Creating sync objects.");
+        create_sync_objects(&device, &mut data)?;
+
         Ok(Self {
             data,
             entry,
             instance,
             window,
-            event_loop: RefCell::new(event_loop),
             device,
             surface_loader,
             swapchain_loader,
         })
     }
 
-    pub fn render_loop<F: Fn()>(&self, f: F) -> Result<(), EventLoopError> {
-        self.event_loop.borrow_mut().run_on_demand(|event, elwp| {
-            elwp.set_control_flow(ControlFlow::Poll);
-            match event {
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested 
-                        | WindowEvent::KeyboardInput {
-                            event: KeyEvent {
-                                state: ElementState::Pressed,
-                                logical_key: Key::Named(NamedKey::Escape),
-                                ..
-                            },
-                            ..
-                        }, 
-                    ..
-                } => {
-                    println!("Exiting!");
-                    elwp.exit();
-                },
-                Event::AboutToWait => f(),
-                _ => {},
-            }
-        })
+    pub unsafe fn render_frame(
+        &mut self,
+    ) -> Result<()> {
+        self.device.wait_for_fences(&[self.data.in_flight_fence], true, u64::MAX)?;
+        self.device.reset_fences(&[self.data.in_flight_fence])?;
+        
+        let image_index = self.swapchain_loader
+            .acquire_next_image(
+                self.data.swapchain,
+                u64::MAX,
+                self.data.image_available_semaphore,
+                self.data.in_flight_fence
+            )?
+            .0 as usize;
+
+        let wait_semaphores = &[self.data.image_available_semaphore];
+        let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let command_buffers = &[self.data.command_buffers[image_index as usize]];
+        let signal_semaphores = &[self.data.render_finished_semaphore];
+        let submit_info = vk::SubmitInfo::default()
+            .wait_semaphores(wait_semaphores)
+            .wait_dst_stage_mask(wait_stages)
+            .command_buffers(command_buffers)
+            .signal_semaphores(signal_semaphores);
+
+        self.device.queue_submit(self.data.graphics_queue, &[submit_info], self.data.in_flight_fence)?;
+
+        let swapchains = &[self.data.swapchain];
+        let image_indices = &[image_index as u32];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(signal_semaphores)
+            .swapchains(swapchains)
+            .image_indices(image_indices);
+
+        self.swapchain_loader.queue_present(self.data.present_queue, &present_info)?;
+
+        Ok(())
     }
 }
 
@@ -278,6 +303,7 @@ fn choose_device(
         data: &mut AppData,
     ) -> Result<()> {
     // check if any vulkan supported GPUs exist
+    info!("Enumerating physical devices.");
     let phys_devices = unsafe { match instance.enumerate_physical_devices() {
         Ok(pdevices) => pdevices,
         Err(e) => return Err(anyhow!("Failed to find GPUs with Vulkan support: {:?}", e))
@@ -287,13 +313,15 @@ fn choose_device(
     let mut phys_device = Err(anyhow!("Failed to find suitable physical device."));
     let mut swapchain_support = Err(anyhow!("Failed to find suitable physical device."));
 
+    info!("Beginning physical device checks.");
     // iterate over all physical devices on system
     for pdevice in phys_devices {
         // get the properties of each device
         let properties = unsafe { instance.get_physical_device_properties(pdevice) };
+        info!("Checking physical device (`{}`)", unsafe {string_from_utf8(&properties.device_name)});
 
         // check for required queue families
-        if let Err(error) = unsafe { QueueFamilyIndices::get(instance, surface_loader, data) } {
+        if let Err(error) = unsafe { QueueFamilyIndices::get(instance, surface_loader, pdevice, data) } {
             warn!("Skipping physical device (`{}`): {}", unsafe { string_from_utf8(&properties.device_name) }, error);
         } else {
             // if required queue families are present, then check required device extensions
@@ -349,7 +377,7 @@ fn create_logical_device(
         device_extension_names_raw: &Vec<*const i8>,
         data: &mut AppData
     ) -> Result<Device> {
-    data.queue_family_indices = unsafe { QueueFamilyIndices::get(instance, surface_loader, data)? };
+    data.queue_family_indices = unsafe { QueueFamilyIndices::get(instance, surface_loader, data.phys_device, data)? };
 
     let mut unique_indices = HashSet::new();
     unique_indices.insert(data.queue_family_indices.graphics);
@@ -496,11 +524,21 @@ fn create_render_pass(
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(color_attachments);
 
+    let dependency = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
     let attachments = &[color_attachment];
     let subpasses = &[subpass];
+    let dependencies = &[dependency];
     let info = vk::RenderPassCreateInfo::default()
         .attachments(attachments)
-        .subpasses(subpasses);
+        .subpasses(subpasses)
+        .dependencies(dependencies);
 
     data.render_pass = unsafe { device.create_render_pass(&info, None)? };
 
@@ -702,6 +740,23 @@ fn create_command_buffers(
     Ok(())
 }
 
+fn create_sync_objects(
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let semaphore_info = vk::SemaphoreCreateInfo::default();
+    let fence_info = vk::FenceCreateInfo::default()
+        .flags(vk::FenceCreateFlags::SIGNALED);
+
+    unsafe {
+        data.image_available_semaphore = device.create_semaphore(&semaphore_info, None)?;
+        data.render_finished_semaphore = device.create_semaphore(&semaphore_info, None)?;
+        data.in_flight_fence = device.create_fence(&fence_info, None)?;
+    }
+
+    Ok(())
+}
+
 /*
  * Structs
  */
@@ -712,6 +767,10 @@ impl Drop for App {
         unsafe {
             self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
             self.device.destroy_pipeline(self.data.pipeline, None);
+
+            self.device.destroy_semaphore(self.data.render_finished_semaphore, None);
+            self.device.destroy_semaphore(self.data.image_available_semaphore, None);
+            self.device.destroy_fence(self.data.in_flight_fence, None);
 
             self.data.framebuffers
                 .iter()
@@ -750,8 +809,9 @@ pub struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    unsafe fn get(instance: &Instance, surface_loader: &surface::Instance, data: &mut AppData) -> Result<Self> {
-        let properties = instance.get_physical_device_queue_family_properties(data.phys_device);
+    unsafe fn get(instance: &Instance, surface_loader: &surface::Instance, phys_device: vk::PhysicalDevice, data: &mut AppData) -> Result<Self> {
+        info!("Getting queue family indices.");
+        let properties = instance.get_physical_device_queue_family_properties(phys_device);
 
         let graphics = properties
             .iter()
@@ -760,7 +820,7 @@ impl QueueFamilyIndices {
 
         let mut present = None;
         for (index, _properties) in properties.iter().enumerate() {
-            if surface_loader.get_physical_device_surface_support(data.phys_device, index as u32, data.surface)? {
+            if surface_loader.get_physical_device_surface_support(phys_device, index as u32, data.surface)? {
                 present = Some(index as u32);
                 break;
             }
