@@ -60,6 +60,7 @@ pub struct AppData {
     pub pipeline_layout: vk::PipelineLayout,
     pub render_pass: vk::RenderPass,
     pub pipeline: vk::Pipeline,
+    pub framebuffers: Vec<vk::Framebuffer>,
 }
 
 impl App {
@@ -106,6 +107,9 @@ impl App {
 
         /* pipeline */
         create_pipeline(&device, &mut data)?;
+
+        /* framebuffers */
+        create_framebuffers(&device, &mut data)?;
         
         Ok(Self {
             data,
@@ -614,6 +618,27 @@ fn create_shader_module(
     Ok(shader_module)
 }
 
+fn create_framebuffers(
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    data.framebuffers = data.swapchain_image_views
+        .iter()
+        .map(|i| {
+            let attachments = &[*i];
+            let framebuffer_create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(data.render_pass)
+                .attachments(attachments)
+                .width(data.swapchain_extent.width)
+                .height(data.swapchain_extent.height)
+                .layers(1);
+
+            unsafe { device.create_framebuffer(&framebuffer_create_info, None) }
+        }).collect::<Result<Vec<_>, _>>()?;
+    
+    Ok(())
+}
+
 /*
  * Structs
  */
@@ -623,15 +648,20 @@ impl Drop for App {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
-            self.device.destroy_render_pass(self.data.render_pass, None);
             self.device.destroy_pipeline(self.data.pipeline, None);
 
+            self.data.framebuffers
+                .iter()
+                .for_each(|f| self.device.destroy_framebuffer(*f, None));
+
+            self.device.destroy_render_pass(self.data.render_pass, None);
+            
             self.device.device_wait_idle().unwrap();
 
-            for &image_view in self.data.swapchain_image_views.iter() {
-                self.device.destroy_image_view(image_view, None);
-            }
-            
+            self.data.swapchain_image_views
+                .iter()
+                .for_each(|i| self.device.destroy_image_view(*i, None));
+
             self.swapchain_loader.destroy_swapchain(self.data.swapchain, None);
 
             self.device.destroy_device(None);
