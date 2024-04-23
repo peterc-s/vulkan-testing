@@ -389,7 +389,6 @@ fn choose_device(
                 break;
             }
 
-            info!("Selecting physical device (`{}`).", unsafe { string_from_utf8(&properties.device_name) });
             phys_device = Ok(pdevice);
             break;
         }
@@ -815,7 +814,6 @@ pub struct QueueFamilyIndices {
 
 impl QueueFamilyIndices {
     unsafe fn get(instance: &Instance, surface_loader: &surface::Instance, phys_device: vk::PhysicalDevice, data: &mut AppData) -> Result<Self> {
-        info!("Getting queue family indices.");
         let properties = instance.get_physical_device_queue_family_properties(phys_device);
 
         let graphics = properties

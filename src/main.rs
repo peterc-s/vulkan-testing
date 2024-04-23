@@ -47,7 +47,8 @@ fn main() -> Result<()> {
                             state: ElementState::Pressed,
                             ..
                         }, ..
-                    } => {
+                    }
+                    | WindowEvent::CloseRequested => {
                         elwt.exit();
                         unsafe { app.destroy() };
                     },
