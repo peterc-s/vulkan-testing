@@ -404,8 +404,6 @@ fn choose_device(
         Err(err) => return Err(err),
     };
 
-    println!("Chosen device: {:?}", unsafe { string_from_utf8(&instance.get_physical_device_properties(data.phys_device).device_name) } );
-
     Ok(())
 }
 
